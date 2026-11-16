@@ -34,6 +34,7 @@ CONTRACT_DERIVED_COLS = [
     '本轮理论发货量', '本轮可用合同量', '本轮合同缺口',
     '剩余合同数量', '推荐下单量', '最晚下单日', '备货状态'
 ]
+STOCK_BALANCE_COL = '期末库存结余（含在途）'
 DEFAULT_LEAD_DAYS = 60
 
 
@@ -1458,7 +1459,7 @@ def compute_sd(row, alloc, transit_dict, earliest_etd, target_eta,
 # ============================================================
 def recommend_q_ship(row_dict, transit_dict, earliest_etd, target_eta,
                      today, sales_cutoff, south_linkage=False,
-                     tol=1.0, max_iter=4):
+                     tol=1.0, max_iter=4, include_stock_balance=False):
     """推荐发货量: 目标为销售截止日当天 RQ ≈ 0(刚好售罄)
 
     算法(解析法, 每行仅 2-4 次推演):
@@ -1472,6 +1473,8 @@ def recommend_q_ship(row_dict, transit_dict, earliest_etd, target_eta,
         q_final: 最终推荐量(已应用 1-9 归零规则)
         q_raw:   应用 1-9 归零前的整数推荐量(用于归零提示)
         status:  'redundant' 已冗余 / 'ok' 正常 / 'small' 1-9被归零
+        include_stock_balance=True 时追加取整后的期末库存结余，q_final>0 时为 None。
+        结余 = q=0 的截止日库存 + 截止日后到货的现有在途，不含未发货合同。
     """
     work = dict(row_dict)
 
@@ -1479,8 +1482,28 @@ def recommend_q_ship(row_dict, transit_dict, earliest_etd, target_eta,
     work['本次总发货量'] = 0.0
     st0 = compute_row_status(work, transit_dict, earliest_etd, target_eta,
                              today, sales_cutoff, south_linkage)
+
+    def result(q_final, q_raw, status):
+        recommendation = (q_final, q_raw, status)
+        if not include_stock_balance:
+            return recommendation
+        stock_balance = None
+        if q_final == 0:
+            # 晚到在途不参与本期需求抵扣，只计入展示结余；复用 q=0 推演。
+            late_in_transit = sum(
+                max(0, qty)
+                for region in REGIONS
+                for arrival_date, qty in parse_in_transit(
+                    row_dict.get(f'{region}_多批次在途', '')
+                ).items()
+                if arrival_date > sales_cutoff
+            )
+            # 与其他数量输出一致，只对最终展示结余取整，沙盘仍保留原精度。
+            stock_balance = int(round(max(0.0, st0['RQ']) + late_in_transit))
+        return (*recommendation, stock_balance)
+
     if st0['RQ'] > 0.5:
-        return 0, 0, 'redundant'
+        return result(0, 0, 'redundant')
 
     # ---- 步骤2: q=Q_max 解析反推 ----
     daily_sales = build_daily_sales_fn(row_dict, today, sales_cutoff=sales_cutoff)
@@ -1491,11 +1514,11 @@ def recommend_q_ship(row_dict, transit_dict, earliest_etd, target_eta,
     )
     # 无实际需求时不进入 +10 的解析试探，避免数值缓冲被误当成发货需求。
     if demand_before_cutoff <= 0.001:
-        return 0, 0, 'ok'
+        return result(0, 0, 'ok')
     q_max = float(int(demand_before_cutoff) + 10)
 
     if q_max <= 0.5:
-        return 0, 0, 'ok'
+        return result(0, 0, 'ok')
 
     work['本次总发货量'] = q_max
     st_max = compute_row_status(work, transit_dict, earliest_etd, target_eta,
@@ -1529,8 +1552,8 @@ def recommend_q_ship(row_dict, transit_dict, earliest_etd, target_eta,
         q_raw = max(0, q_raw - adjustment)
 
     if 1 <= q_raw <= 9:
-        return 0, q_raw, 'small'
-    return q_raw, q_raw, 'ok'
+        return result(0, q_raw, 'small')
+    return result(q_raw, q_raw, 'ok')
 
 # ============================================================
 # 调拨执行函数（带物理上限保护）
@@ -2947,11 +2970,24 @@ if rec_msgs:
         st.warning("⚠️ " + "; ".join(parts) + "。明细见表格「备注」列。")
 
 daily_editor_columns = [col for col in df_input.columns if is_daily_forecast_column(col)]
+editor_column_config = {col: None for col in daily_editor_columns}
+if STOCK_BALANCE_COL in df_input.columns:
+    # 兼容当前会话中已生成的小数结果，保留不适用行的空值。
+    df_input[STOCK_BALANCE_COL] = pd.to_numeric(
+        df_input[STOCK_BALANCE_COL], errors='coerce'
+    ).round().astype('Int64')
+    editor_column_config[STOCK_BALANCE_COL] = st.column_config.NumberColumn(
+        STOCK_BALANCE_COL,
+        format="%d",
+        disabled=True,
+        help="本轮理论发货量为0时显示，单位pcs，合计后取整。截止日当天消耗后的全区域库存"
+             "加上截止日后到货的现有在途；不扣截止日后的销售，不含未发货合同。"
+    )
 edited_df = st.data_editor(
     df_input,
     num_rows="dynamic",
     use_container_width=True,
-    column_config={col: None for col in daily_editor_columns},
+    column_config=editor_column_config,
     key=f"main_editor_v{st.session_state.get('rec_version', 0)}"
 )
 
@@ -2995,7 +3031,8 @@ if btn_recommend:
             st.stop()
 
         rec_df = edited_df.copy()
-        drop_cols = [c for c in (CONTRACT_DERIVED_COLS + ['备注']) if c in rec_df.columns]
+        drop_cols = [c for c in (CONTRACT_DERIVED_COLS + [STOCK_BALANCE_COL, '备注'])
+                     if c in rec_df.columns]
         if drop_cols:
             rec_df = rec_df.drop(columns=drop_cols)
 
@@ -3026,6 +3063,7 @@ if btn_recommend:
             n_rows = len(rec_df)
             prog = st.progress(0, text=f"正在计算推荐备发货量... 0/{n_rows}")
             notes = []
+            stock_balances = []
             derived_values = {col: [] for col in CONTRACT_DERIVED_COLS}
             deduct_records = []
             plan_records = []
@@ -3037,10 +3075,11 @@ if btn_recommend:
             missing_contract_count = 0
             missing_lead_count = 0
             for i, (idx, row) in enumerate(rec_df.iterrows()):
-                q_final, q_raw, status = recommend_q_ship(
+                q_final, q_raw, status, stock_balance = recommend_q_ship(
                     row.to_dict(), transit_times, earliest_etd, target_eta,
-                    today, sales_cutoff, False
+                    today, sales_cutoff, False, include_stock_balance=True
                 )
+                stock_balances.append(stock_balance)
                 note = ''
                 if status == 'small':
                     note = f"本轮发货需求{int(round(q_raw))}pcs已归零"
@@ -3085,6 +3124,10 @@ if btn_recommend:
             for col in CONTRACT_DERIVED_COLS:
                 rec_df.insert(insert_pos, col, derived_values[col])
                 insert_pos += 1
+                if col == '本轮理论发货量':
+                    rec_df.insert(insert_pos, STOCK_BALANCE_COL,
+                                  pd.Series(stock_balances, index=rec_df.index, dtype='Int64'))
+                    insert_pos += 1
             rec_df.insert(insert_pos, '备注', notes)
 
             st.session_state['recommended_df'] = rec_df

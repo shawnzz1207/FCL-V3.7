@@ -4,7 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="11455900-380c-4334-8ac7-b276898bc6e8" name="更改" comment="优化分区调拨性能并合并同库存批次的互调结果，同时修正零需求场景误生成推荐发货量的问题">
+    <list default="true" id="11455900-380c-4334-8ac7-b276898bc6e8" name="更改" comment="优化阶段1调拨的日销缓存问题，提升运算效率">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/fcl_planner.py" beforeDir="false" afterPath="$PROJECT_DIR$/fcl_planner.py" afterDir="false" />
     </list>
@@ -102,7 +102,15 @@
       <option name="project" value="LOCAL" />
       <updated>1787740373632</updated>
     </task>
-    <option name="localTasksCounter" value="5" />
+    <task id="LOCAL-00005" summary="优化阶段1调拨的日销缓存问题，提升运算效率">
+      <option name="closed" value="true" />
+      <created>1788141520083</created>
+      <option name="number" value="00005" />
+      <option name="presentableId" value="LOCAL-00005" />
+      <option name="project" value="LOCAL" />
+      <updated>1788141520083</updated>
+    </task>
+    <option name="localTasksCounter" value="6" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -113,6 +121,7 @@
     <MESSAGE value="优化分区调拨算法，提效约5倍；" />
     <MESSAGE value="名词修改：“救命”改为“挽回”" />
     <MESSAGE value="优化分区调拨性能并合并同库存批次的互调结果，同时修正零需求场景误生成推荐发货量的问题" />
-    <option name="LAST_COMMIT_MESSAGE" value="优化分区调拨性能并合并同库存批次的互调结果，同时修正零需求场景误生成推荐发货量的问题" />
+    <MESSAGE value="优化阶段1调拨的日销缓存问题，提升运算效率" />
+    <option name="LAST_COMMIT_MESSAGE" value="优化阶段1调拨的日销缓存问题，提升运算效率" />
   </component>
 </project>
