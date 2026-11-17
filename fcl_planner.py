@@ -477,8 +477,11 @@ def simulate_global_stock(row, initial_stock, arrival_events, today, until=None,
             events_by_date[dt] = events_by_date.get(dt, 0.0) + float(qty)
 
     last_event_date = max(events_by_date.keys(), default=today)
-    sim_until = until or today + datetime.timedelta(days=max_days)
-    sim_until = max(sim_until, last_event_date + datetime.timedelta(days=1))
+    if until is not None:
+        sim_until = until
+    else:
+        sim_until = max(today + datetime.timedelta(days=max_days),
+                        last_event_date + datetime.timedelta(days=1))
 
     first_need_date = None
     final_oos_date = None
@@ -504,6 +507,40 @@ def simulate_global_stock(row, initial_stock, arrival_events, today, until=None,
         'final_oos_date': final_oos_date,
         'stock_at_end': max(0.0, stock),
     }
+
+
+def compute_contract_order_gap(row, initial_stock, arrival_events, today,
+                                earliest_arrival, coverage_cutoff, daily_sales_fn):
+    """仅补新订单能赶上的逐日缺口；后到货不能抵扣之前的丢单。"""
+    start_date = max(earliest_arrival, today + datetime.timedelta(days=1))
+    if coverage_cutoff < start_date:
+        return 0, None
+    before_arrival = simulate_global_stock(
+        row, initial_stock, arrival_events, today,
+        until=start_date - datetime.timedelta(days=1), daily_sales_fn=daily_sales_fn
+    )
+    stock = before_arrival['stock_at_end']
+    events_by_date = {}
+    for arrival_date, qty in arrival_events:
+        if qty > 0 and start_date <= arrival_date <= coverage_cutoff:
+            events_by_date[arrival_date] = events_by_date.get(arrival_date, 0.0) + qty
+
+    shortage_qty = 0.0
+    first_gap_date = None
+    sim_date = start_date
+    while sim_date <= coverage_cutoff:
+        stock += events_by_date.get(sim_date, 0.0)
+        demand = daily_sales_fn(sim_date)
+        shortage = max(0.0, demand - stock)
+        if shortage > 1e-9:
+            shortage_qty += shortage
+            if first_gap_date is None:
+                first_gap_date = sim_date
+        stock = max(0.0, stock - demand)
+        sim_date += datetime.timedelta(days=1)
+
+    # 按实际消费逐日结算后的累计丢单，是在 start_date 到货即可覆盖的最小补货量。
+    return max(0, int(math.ceil(shortage_qty - 1e-9))), first_gap_date
 
 
 def deduct_current_contracts(row, row_contracts, theoretical_qty, earliest_etd):
@@ -721,51 +758,33 @@ def compute_contract_recommendation(row, contracts, lead_days_by_spu, theoretica
         daily_sales_fn=contract_daily_sales_fn
     )
 
-    coverage_days = int(lead_days) + int(ocean_cycle_days) + int(sales_cycle_days)
+    replenishment_days = int(lead_days) + int(ocean_cycle_days)
+    current_order_arrival = today + datetime.timedelta(days=replenishment_days)
+    coverage_days = replenishment_days + int(sales_cycle_days)
     coverage_cutoff = today + datetime.timedelta(days=coverage_days)
-    demand_to_cutoff = forecast_demand_between(
-        row, today, today + datetime.timedelta(days=1), coverage_cutoff,
-        daily_sales_fn=contract_daily_sales_fn
-    )
-    supply_to_cutoff = initial_stock + sum(qty for dt, qty in scheduled_events
-                                           if dt <= coverage_cutoff)
-    recommend_order_qty = max(0, int(math.ceil(demand_to_cutoff - supply_to_cutoff)))
 
     final_sim = simulate_global_stock(
         row, initial_stock, scheduled_events, today,
         daily_sales_fn=contract_daily_sales_fn
     )
     final_oos = final_sim['final_oos_date']
-    latest_order_date = (final_oos - datetime.timedelta(days=int(lead_days) + int(ocean_cycle_days))
-                         if final_oos else None)
-
-    # 历史最晚下单日无法再覆盖此前需求，只保留当前订单可正常到美后的销售周期需求。
-    if latest_order_date and latest_order_date < today:
-        current_order_arrival = today + datetime.timedelta(
-            days=int(lead_days) + int(ocean_cycle_days)
-        )
-        current_order_cutoff = current_order_arrival + datetime.timedelta(
+    # 保留原覆盖期边界；已有最终耗尽日早于新订单到货时，使用到货日起的销售周期。
+    if final_oos and final_oos < current_order_arrival:
+        coverage_cutoff = current_order_arrival + datetime.timedelta(
             days=max(0, int(sales_cycle_days) - 1)
         )
-        before_arrival = simulate_global_stock(
-            row, initial_stock, scheduled_events, today,
-            until=current_order_arrival - datetime.timedelta(days=1),
-            daily_sales_fn=contract_daily_sales_fn
-        )
-        supply_after_arrival = before_arrival['stock_at_end'] + sum(
-            qty for dt, qty in scheduled_events
-            if current_order_arrival <= dt <= current_order_cutoff
-        )
-        demand_after_arrival = forecast_demand_between(
-            row, today, current_order_arrival, current_order_cutoff,
-            daily_sales_fn=contract_daily_sales_fn
-        )
-        recommend_order_qty = max(0, int(math.ceil(demand_after_arrival - supply_after_arrival)))
-        latest_order_date = None
+    recommend_order_qty, first_order_gap = compute_contract_order_gap(
+        row, initial_stock, scheduled_events, today, current_order_arrival,
+        coverage_cutoff, contract_daily_sales_fn
+    )
+    latest_order_date = (first_order_gap - datetime.timedelta(days=replenishment_days)
+                         if first_order_gap is not None else None)
 
     if 0 < recommend_order_qty < 10:
         remarks.append(f'推荐下单量{recommend_order_qty}pcs已归零')
         recommend_order_qty = 0
+    if recommend_order_qty == 0:
+        latest_order_date = None
 
     if hidden['首个未覆盖空窗日'] is not None:
         remarks.append('部分剩余合同到美晚于补货需求日，详见剩余合同发货计划')
@@ -1296,6 +1315,8 @@ def compute_row_status(row, transit_dict, earliest_etd, target_eta,
     - SD: 实际可售天数（从今天到销售截止日，全网物理库存 > 0 的天数）
     - RQ: 剩余冗余量（销售截止日当天的全网物理库存）
     - CZ: 销售截止日前累计跨区订单数
+    - daily_shortage: 按相对今天的天数记录未满足销量（稀疏字典）
+    - shortage_qty: 期间累计未满足销量，与期末 RQ 分别计量
 
     性能优化：单次推演同时输出 SD/RQ/CZ（替代旧版的 2 次推演）
     """
@@ -1306,7 +1327,7 @@ def compute_row_status(row, transit_dict, earliest_etd, target_eta,
         sales_cutoff=sales_cutoff, daily_sales_fn=daily_sales_fn
     )
     # 单次推演同时输出 SD/RQ/CZ
-    sd, rq, cz, sim_stock_at_cutoff = _compute_sd_rq_cz_in_one_pass(
+    sd, rq, cz, sim_stock_at_cutoff, daily_shortage = _compute_sd_rq_cz_in_one_pass(
         row_dict, alloc, transit_dict, earliest_etd, target_eta,
         today, sales_cutoff, daily_sales_fn=daily_sales_fn
     )
@@ -1317,6 +1338,8 @@ def compute_row_status(row, transit_dict, earliest_etd, target_eta,
         'CZ': cz,
         'alloc': alloc,
         'sim_stock_at_cutoff': sim_stock_at_cutoff,
+        'daily_shortage': daily_shortage,
+        'shortage_qty': sum(daily_shortage.values()),
     }
 
 
@@ -1342,6 +1365,7 @@ def _compute_sd_rq_cz_in_one_pass(row, alloc, transit_dict, earliest_etd, target
     cz_total = 0.0
     sales_window = (sales_cutoff - today).days
     sim_stock_at_cutoff = None
+    daily_shortage = {}
 
     for d_idx in range(1, sales_window + 1):
         sim_date = today + datetime.timedelta(days=d_idx)
@@ -1384,6 +1408,10 @@ def _compute_sd_rq_cz_in_one_pass(row, alloc, transit_dict, earliest_etd, target
                     unmet += (split - sim_stock[r])
                     sim_stock[r] = 0.0
 
+        # 丢单不结转成欠单，但必须保留日期，不能被后到货的期末库存抵消。
+        if unmet > 0.001:
+            daily_shortage[d_idx] = unmet
+
         # 销售截止日当天截取库存（即 sales_window 那天）
         if d_idx == sales_window:
             sim_stock_at_cutoff = {r: max(0, sim_stock[r]) for r in REGIONS}
@@ -1392,7 +1420,7 @@ def _compute_sd_rq_cz_in_one_pass(row, alloc, transit_dict, earliest_etd, target
         sim_stock_at_cutoff = {r: max(0, sim_stock[r]) for r in REGIONS}
 
     rq = sum(sim_stock_at_cutoff.values())
-    return sd_count, rq, cz_total, sim_stock_at_cutoff
+    return sd_count, rq, cz_total, sim_stock_at_cutoff, daily_shortage
 
 
 def compute_sd(row, alloc, transit_dict, earliest_etd, target_eta,
@@ -1455,104 +1483,129 @@ def compute_sd(row, alloc, transit_dict, earliest_etd, target_eta,
 
     return sd_count
 # ============================================================
-# V3.7a 新增: 推荐发货量引擎(解析法)
+# 推荐发货量及减量：按逐日缺货量校验
 # ============================================================
+def shortage_not_worse(candidate, reference):
+    """每一天都不新增缺货；SD 相同并不代表当天售足。"""
+    return all(qty <= reference['daily_shortage'].get(day, 0.0) + 0.001
+               for day, qty in candidate['daily_shortage'].items())
+
+
+def _shipment_status_fn(row, transit_dict, earliest_etd, target_eta,
+                        today, sales_cutoff, south_linkage, baseline_status=None):
+    daily_sales = build_daily_sales_fn(row, today, sales_cutoff=sales_cutoff)
+    cache = {}
+    if baseline_status is not None:
+        cache[float(row.get('本次总发货量', 0) or 0)] = baseline_status
+
+    def status_for(qty):
+        if qty not in cache:
+            work = dict(row)
+            work['本次总发货量'] = qty
+            cache[qty] = compute_row_status(
+                work, transit_dict, earliest_etd, target_eta,
+                today, sales_cutoff, south_linkage, daily_sales_fn=daily_sales
+            )
+        return cache[qty]
+
+    return status_for, daily_sales
+
+
+def _find_service_preserving_quantity(status_for, reference, upper):
+    """先试缺货差对应的整数下界；分区到货不同步时有界搜索并逐日复核。"""
+    zero = status_for(0)
+    lower = max(0, int(math.ceil(zero['shortage_qty'] - reference['shortage_qty'] - 0.001)))
+    lower = min(lower, upper)
+    if shortage_not_worse(status_for(lower), reference):
+        return lower
+
+    # hi 始终是已验证的可行解。即使分区取整不完全单调，也不返回未验证减量。
+    lo, hi = lower, upper
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if shortage_not_worse(status_for(mid), reference):
+            hi = mid
+        else:
+            lo = mid
+    return hi
+
+
+def stock_balance_at_cutoff(row, status, sales_cutoff, arrivals=None):
+    """截止日结余加尚未到货的在途；不抵扣之前丢单，不含未发货合同。"""
+    late_in_transit = sum(
+        max(0, qty)
+        for region in REGIONS
+        for arrival_date, qty in parse_in_transit(row.get(f'{region}_多批次在途', '')).items()
+        if arrival_date > sales_cutoff
+    )
+    late_shipment = (sum(status['alloc'].get(r, 0) for r in REGIONS
+                         if arrivals[r] > sales_cutoff) if arrivals is not None else 0)
+    return int(round(max(0.0, status['RQ']) + late_in_transit + late_shipment))
+
+
+def service_preserving_ship_quantity(row, transit_dict, earliest_etd, target_eta,
+                                     today, sales_cutoff, south_linkage=False,
+                                     baseline_status=None):
+    """减量不得扩大任一天的缺货；期末有库存不等于本轮发货可减。"""
+    original_qty = float(row.get('本次总发货量', 0) or 0)
+    if original_qty <= 0.5:
+        return original_qty
+    status_for, _ = _shipment_status_fn(
+        row, transit_dict, earliest_etd, target_eta, today, sales_cutoff, south_linkage,
+        baseline_status=baseline_status
+    )
+    baseline = baseline_status if baseline_status is not None else status_for(original_qty)
+    if baseline['RQ'] <= 0.5:
+        return original_qty
+    upper = int(math.floor(original_qty))
+    # 调拨可能产生小数；只接受不增量、且通过实际分区推演的整数候选。
+    if not shortage_not_worse(status_for(upper), baseline):
+        return original_qty
+    return _find_service_preserving_quantity(status_for, baseline, upper)
+
+
 def recommend_q_ship(row_dict, transit_dict, earliest_etd, target_eta,
                      today, sales_cutoff, south_linkage=False,
                      tol=1.0, max_iter=4, include_stock_balance=False):
-    """推荐发货量: 目标为销售截止日当天 RQ ≈ 0(刚好售罄)
+    """补足本轮能覆盖的逐日缺口，允许期间缺货与期末结余同时存在。
 
-    算法(解析法, 每行仅 2-4 次推演):
-      步骤1: q=0 推演 → RQ>0 说明现有库存已冗余, 推荐 0
-      步骤2: q=Q_max(销售窗口总需求) 推演 → q* = Q_max - RQ_max
-             (超出网络消化能力的部分 1:1 变成剩余, 解析反推)
-      步骤3: 用 q* 验证, 若 RQ 仍超容差则牛顿式修正 q* -= RQ
-
-    Returns:
-        (q_final, q_raw, status)
-        q_final: 最终推荐量(已应用 1-9 归零规则)
-        q_raw:   应用 1-9 归零前的整数推荐量(用于归零提示)
-        status:  'redundant' 已冗余 / 'ok' 正常 / 'small' 1-9被归零
-        include_stock_balance=True 时追加取整后的期末库存结余，q_final>0 时为 None。
-        结余 = q=0 的截止日库存 + 截止日后到货的现有在途，不含未发货合同。
+    返回 (q_final, q_raw, status)，仍保留 1-9 归零规则。
+    include_stock_balance=True 时追加按 q_final 推演的整数期末结余（含在途）。
+    tol/max_iter 保留调用兼容，安全判断改用逐日缺货复核，不再以 RQ≈0 为目标。
     """
-    work = dict(row_dict)
-
-    # ---- 步骤1: q=0 ----
-    work['本次总发货量'] = 0.0
-    st0 = compute_row_status(work, transit_dict, earliest_etd, target_eta,
-                             today, sales_cutoff, south_linkage)
+    status_for, daily_sales = _shipment_status_fn(
+        row_dict, transit_dict, earliest_etd, target_eta, today, sales_cutoff, south_linkage
+    )
+    st0 = status_for(0)
 
     def result(q_final, q_raw, status):
         recommendation = (q_final, q_raw, status)
         if not include_stock_balance:
             return recommendation
-        stock_balance = None
-        if q_final == 0:
-            # 晚到在途不参与本期需求抵扣，只计入展示结余；复用 q=0 推演。
-            late_in_transit = sum(
-                max(0, qty)
-                for region in REGIONS
-                for arrival_date, qty in parse_in_transit(
-                    row_dict.get(f'{region}_多批次在途', '')
-                ).items()
-                if arrival_date > sales_cutoff
-            )
-            # 与其他数量输出一致，只对最终展示结余取整，沙盘仍保留原精度。
-            stock_balance = int(round(max(0.0, st0['RQ']) + late_in_transit))
+        stock_balance = stock_balance_at_cutoff(
+            row_dict, status_for(q_final), sales_cutoff,
+            compute_arrivals(transit_dict, earliest_etd, target_eta)
+        )
         return (*recommendation, stock_balance)
 
-    if st0['RQ'] > 0.5:
-        return result(0, 0, 'redundant')
+    if st0['shortage_qty'] <= 0.001:
+        return result(0, 0, 'redundant' if st0['RQ'] > 0.5 else 'ok')
 
-    # ---- 步骤2: q=Q_max 解析反推 ----
-    daily_sales = build_daily_sales_fn(row_dict, today, sales_cutoff=sales_cutoff)
     sales_window = (sales_cutoff - today).days
     demand_before_cutoff = sum(
         daily_sales(today + datetime.timedelta(days=i))
         for i in range(1, sales_window + 1)
     )
-    # 无实际需求时不进入 +10 的解析试探，避免数值缓冲被误当成发货需求。
     if demand_before_cutoff <= 0.001:
         return result(0, 0, 'ok')
-    q_max = float(int(demand_before_cutoff) + 10)
-
-    if q_max <= 0.5:
-        return result(0, 0, 'ok')
-
-    work['本次总发货量'] = q_max
-    st_max = compute_row_status(work, transit_dict, earliest_etd, target_eta,
-                                today, sales_cutoff, south_linkage)
-    q_star = q_max - st_max['RQ']
-
-    # ---- 步骤3: 验证 + 牛顿式修正 ----
-    for _ in range(max_iter):
-        if q_star <= 0.5:
-            q_star = 0.0
-            break
-        work['本次总发货量'] = q_star
-        st_v = compute_row_status(work, transit_dict, earliest_etd, target_eta,
-                                  today, sales_cutoff, south_linkage)
-        if st_v['RQ'] <= tol:
-            break
-        q_star -= st_v['RQ']
-
-    # ---- 步骤4: 整数取整后复核 ----
-    # 四舍五入可能重新产生 0.5-1 件余量；按整数件下调，避免阶段2再次减 1。
-    q_raw = max(0, int(round(q_star)))
-    for _ in range(max_iter):
-        if q_raw <= 0:
-            break
-        work['本次总发货量'] = float(q_raw)
-        st_int = compute_row_status(work, transit_dict, earliest_etd, target_eta,
-                                    today, sales_cutoff, south_linkage)
-        if st_int['RQ'] <= 0.5:
-            break
-        adjustment = max(1, int(math.ceil(st_int['RQ'] - 0.5)))
-        q_raw = max(0, q_raw - adjustment)
-
+    # 大量试发仅用于得到本轮排期可达的缺货基准；到货前不可补救的丢单不追补。
+    q_max = int(demand_before_cutoff) + 10
+    st_max = status_for(q_max)
+    q_raw = _find_service_preserving_quantity(status_for, st_max, q_max)
     if 1 <= q_raw <= 9:
         return result(0, q_raw, 'small')
+    if q_raw == 0 and st0['RQ'] > 0.5:
+        return result(0, 0, 'redundant')
     return result(q_raw, q_raw, 'ok')
 
 # ============================================================
@@ -1767,13 +1820,11 @@ def stage1_redundancy_transfer(df, transit_dict, earliest_etd, target_eta,
             # 识别冗余方 & 缺货方
             # 冗余方：RQ > 0（销售截止日还有剩余）
             redundant = [idx for idx in sku_indices if status[idx]['RQ'] > 0.5]
-            # 缺货方：SD < 销售窗口天数（过程中存在断货，不论 RQ）
-            #   - 包含真·缺货方（RQ=0，整体卖空）
-            #   - 包含等待期伪缺货方（RQ>0，但启动期/中途有空窗）
+            # 缺货方：实际有丢单，而不是仅凭某天库存为 0 判定（不论 RQ）。
             # 全段预测为 0 的行没有销售需求，不进入调入候选。
             shortage = [idx for idx in sku_indices
                         if sum(float(df.at[idx, col]) for col in FORECAST_COLS) > 0
-                        and status[idx]['SD'] < sales_window - 0.5]
+                        and status[idx]['shortage_qty'] > 0.001]
 
             if not redundant or not shortage:
                 break
@@ -1875,7 +1926,7 @@ def binary_search_max_transfer(df, g_idx, r_idx, src_type, src_region, src_date,
                                daily_sales_fns=None):
     """二分搜索：找出"3 重锁"下最大的可调拨量
     锁1: qty <= src_max （物理上限）  → 已在 apply_transfer 保护
-    锁2: 调出方调出后 SD 不下降（不变得"更缺货"）
+    锁2: 调出方调出后 SD 不下降，且双方逐日缺货均不增加
     锁3: 调入方调入后不产生新的可减冗余
          - 原 RQ ≤ 0.5 时，调入后 RQ 最高为 0.5
          - 原 RQ > 0.5 时，调入后 RQ 不得超过原值
@@ -1927,7 +1978,9 @@ def binary_search_max_transfer(df, g_idx, r_idx, src_type, src_region, src_date,
         restore_transfer_cells(df, backup)
 
         # 锁2: 调出方 SD 不下降（不变得更缺货）
-        lock2_ok = (g_new['SD'] >= g_baseline_sd - 0.5)
+        lock2_ok = (g_new['SD'] >= g_baseline_sd - 0.5
+                    and shortage_not_worse(g_new, g_status)
+                    and shortage_not_worse(r_new, r_status))
         # 锁3: 不让本阶段新增需要在阶段2处理的冗余。
         lock3_ok = (r_new['RQ'] <= r_rq_limit + 1e-6)
 
@@ -1947,9 +2000,7 @@ def binary_search_max_transfer(df, g_idx, r_idx, src_type, src_region, src_date,
 # ============================================================
 def stage2_independent_reduction(df, transit_dict, earliest_etd, target_eta,
                                  today, sales_cutoff, south_linkage=False):
-    """阶段2 独立减量
-    公式: new_q_ship = q_ship - min(RQ, q_ship)
-    """
+    """阶段2 独立减量：只减掉不会扩大任一天缺口的本轮发货。"""
     df = df.copy().reset_index(drop=True)
     reduce_records = []
 
@@ -1970,9 +2021,11 @@ def stage2_independent_reduction(df, transit_dict, earliest_etd, target_eta,
         if rq <= 0.5:
             continue  # 不冗余，无需减量
 
-        # 应用简化公式
-        delta = min(rq, q_ship)
-        new_q_ship = q_ship - delta
+        new_q_ship = service_preserving_ship_quantity(
+            row_dict, transit_dict, earliest_etd, target_eta,
+            today, sales_cutoff, south_linkage, baseline_status=status
+        )
+        delta = q_ship - new_q_ship
 
         if delta > 0.5:
             df.at[idx, '本次总发货量'] = new_q_ship
@@ -1983,7 +2036,7 @@ def stage2_independent_reduction(df, transit_dict, earliest_etd, target_eta,
                 '店铺': row_dict.get('店铺', '-'),
                 '原发货量': int(round(q_ship)),
                 '减量后发货量': int(round(new_q_ship)),
-                '减量原因': f"冗余调拨后剩余 RQ={int(round(rq))}",
+                '减量原因': f"逐日校验无新增缺货，可减{int(round(delta))}件（期末结余{int(round(rq))}件）",
             })
 
     return reduce_records, df
@@ -2146,6 +2199,9 @@ def evaluate_single_transfer(df, out_idx, in_idx, src_type, src_region, src_date
     out_old = baseline_status[out_idx]
     in_old = baseline_status[in_idx]
 
+    if not (shortage_not_worse(out_new, out_old) and shortage_not_worse(in_new, in_old)):
+        return 0, False
+
     # 锁2: 调出方 SD 不下降
     if out_new['SD'] < out_old['SD'] - 0.5:
         return 0, False
@@ -2203,6 +2259,9 @@ def evaluate_swap_transfer(df, a_idx, b_idx,
 
     a_old = baseline_status[a_idx]
     b_old = baseline_status[b_idx]
+
+    if not (shortage_not_worse(a_new, a_old) and shortage_not_worse(b_new, b_old)):
+        return 0, False
 
     # 锁2/3: 双方 SD 不下降
     if a_new['SD'] < a_old['SD'] - 0.5:
@@ -2980,8 +3039,8 @@ if STOCK_BALANCE_COL in df_input.columns:
         STOCK_BALANCE_COL,
         format="%d",
         disabled=True,
-        help="本轮理论发货量为0时显示，单位pcs，合计后取整。截止日当天消耗后的全区域库存"
-             "加上截止日后到货的现有在途；不扣截止日后的销售，不含未发货合同。"
+        help="按本轮实际发货量测算，可与发货需求同时显示，单位pcs，合计后取整。截止日当天消耗后的全区域库存"
+             "加上截止日后到货的现有在途和本轮发货；不扣截止日后的销售，不含未发货合同。"
     )
 edited_df = st.data_editor(
     df_input,
@@ -3079,7 +3138,6 @@ if btn_recommend:
                     row.to_dict(), transit_times, earliest_etd, target_eta,
                     today, sales_cutoff, False, include_stock_balance=True
                 )
-                stock_balances.append(stock_balance)
                 note = ''
                 if status == 'small':
                     note = f"本轮发货需求{int(round(q_raw))}pcs已归零"
@@ -3094,6 +3152,17 @@ if btn_recommend:
                     contract_ocean_cycle_days, contract_sales_cycle_days
                 )
                 rec_df.at[idx, '本次总发货量'] = float(contract_result['本轮实际发货量'])
+                if contract_result['本轮实际发货量'] != q_final:
+                    actual_row = row.to_dict()
+                    actual_row['本次总发货量'] = contract_result['本轮实际发货量']
+                    actual_status = compute_row_status(
+                        actual_row, transit_times, earliest_etd, target_eta, today, sales_cutoff
+                    )
+                    stock_balance = stock_balance_at_cutoff(
+                        actual_row, actual_status, sales_cutoff,
+                        compute_arrivals(transit_times, earliest_etd, target_eta)
+                    )
+                stock_balances.append(stock_balance)
 
                 derived_values['本轮理论发货量'].append(int(round(q_final)))
                 for col in CONTRACT_DERIVED_COLS:
@@ -3211,18 +3280,19 @@ def compute_main_board(df, transit_dict, earliest_etd, target_eta, today, sales_
         def fmt_date(d_obj, amt):
             return d_obj.strftime('%Y-%m-%d') if amt > 0 else "-"
 
-        # 建议减量：基于 RQ 的简化公式 q' = q - min(RQ, q)
+        # 与阶段2共用逐日缺货保护，避免对补空窗的必要发货再建议减量。
         st_data = compute_row_status(row_dict, transit_dict, earliest_etd, target_eta,
                                      today, sales_cutoff, south_linkage)
         rq = st_data['RQ']
         is_redundant = (rq > 0.5)
         suggest_qty_str = "-"
         if is_redundant and q_ship > 0.5:
-            new_q = q_ship - min(rq, q_ship)
-            if new_q < 0.5:
-                suggest_qty_str = "建议不发货"
-            else:
-                suggest_qty_str = str(int(round(new_q)))
+            new_q = service_preserving_ship_quantity(
+                row_dict, transit_dict, earliest_etd, target_eta,
+                today, sales_cutoff, south_linkage, baseline_status=st_data
+            )
+            if q_ship - new_q > 0.5:
+                suggest_qty_str = "建议不发货" if new_q < 0.5 else str(int(round(new_q)))
 
         results.append({
             'SKU': row_dict.get('SKU', '-'),
