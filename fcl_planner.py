@@ -1,16 +1,17 @@
-# V3.6.5 单文件部署版
-# 启动: streamlit run app_v3.6.5.py
+# V3.7 单文件部署版
+# 启动: streamlit run fcl_planner.py
 import pandas as pd
 import datetime
 import calendar
 import copy
 import io
 import math
+from html import escape
 import streamlit as st
 from openpyxl.utils import get_column_letter
 
 # 设置宽布局（必须是第一个 streamlit 命令）
-st.set_page_config(page_title="北美全渠道智能分仓系统 V3.6.5", layout="wide")
+st.set_page_config(page_title="北美全渠道智能库存计算器 V3.7.0", layout="wide")
 # ============================================================
 # 全局常量
 # ============================================================
@@ -2812,10 +2813,136 @@ def run_full_pipeline(df_baseline, transit_dict, earliest_etd, target_eta,
 # ============================================================
 # (本文件实际部署时，会把 step1/2/3 的代码全部内联进来)
 
-st.title("📦 北美全渠道智能库存计算器 V3.7.0")
-st.caption("🎯 分层双轨调拨版 · 物理真实推演 · 状态机交互")
+def render_ui_styles():
+    # Presentation only. Keep the data editor, state machine and engine unchanged.
+    st.html("""
+    <style>
+    :root { --fcl-accent: #176d66; --fcl-muted: #737a80; --fcl-line: #e5e7e9; }
+    html { scroll-padding-top: 64px; }
+    .stApp { font-variant-numeric: tabular-nums; }
+    .stApp, .stApp * { letter-spacing: 0; }
+    [data-testid="stMainBlockContainer"] { padding: 64px 32px 56px; max-width: none; }
+    [data-testid="stHeader"] { background: #ffffff; }
+    [data-testid="stVerticalBlock"] { gap: 12px; }
+    [data-testid="stSidebar"] { min-width: 252px; max-width: 280px; border-right: 1px solid var(--fcl-line); }
+    [data-testid="stSidebarUserContent"] { padding: 20px 20px 32px; }
+    [data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap: 12px; }
+    [data-testid="stSidebar"] h2 { font-size: 14px !important; font-weight: 600; padding: 12px 0; }
+    [data-testid="stSidebar"] h3 { font-size: 13px !important; font-weight: 600; padding: 8px 0; }
+    [data-testid="stWidgetLabel"] p { font-size: 13px; }
+    [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p { font-size: 12px; }
+    [data-testid="stSidebar"] input { font-size: 13px; min-height: 34px; }
+    [data-testid="stSidebar"] hr { margin: 12px 0; }
+    h1, h2, h3, h4 { font-weight: 600 !important; overflow-wrap: anywhere; }
+    h1 { font-size: 24px !important; }
+    h2 { font-size: 18px !important; }
+    h3, h4 { font-size: 14px !important; }
+    [data-testid="stButton"] button, [data-testid="stDownloadButton"] button {
+      min-height: 36px; border-radius: 6px; padding: 6px 12px; white-space: nowrap;
+    }
+    [data-testid="stButton"] button p, [data-testid="stDownloadButton"] button p { font-size: 13px; }
+    [data-testid="stBaseButton-primary"] { background: var(--fcl-accent); border-color: var(--fcl-accent); color: white; }
+    [data-testid="stBaseButton-primary"]:hover { background: #125a54; border-color: #125a54; color: white; }
+    [data-testid="stDataFrame"], [data-testid="stDataEditor"] { border-radius: 6px; }
+    [data-testid="stAlert"] { border-radius: 4px; padding: 10px 12px; }
+    [data-testid="stAlert"] p { font-size: 13px; }
+    [data-testid="stFileUploaderDropzone"] { padding: 10px 12px; min-height: 64px; border-radius: 6px; }
+    [data-testid="stFileUploaderDropzone"] span, [data-testid="stFileUploaderDropzone"] small { font-size: 12px; }
+    [data-testid="stFileUploaderDropzone"] button { white-space: nowrap; border-radius: 6px; }
+    .st-key-fcl-imports { padding: 8px 0 16px; border-top: 1px solid var(--fcl-line); border-bottom: 1px solid var(--fcl-line); }
+    .st-key-fcl-summary { padding: 8px 0 16px; }
+    .st-key-fcl-summary [data-testid="stMetric"] { padding: 0 16px; border-left: 1px solid var(--fcl-line); }
+    .st-key-fcl-summary [data-testid="stColumn"]:first-child [data-testid="stMetric"] { border-left: 0; padding-left: 0; }
+    .st-key-fcl-summary [data-testid="stMetricLabel"] p { font-size: 12px; color: #5c6369; }
+    .st-key-fcl-summary [data-testid="stMetricValue"] { font-size: 26px; font-weight: 500; }
+    .fcl-brand { display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--fcl-line); padding-bottom: 20px; margin-bottom: 8px; }
+    .fcl-brand strong { font-size: 27px; font-weight: 600; }
+    .fcl-brand strong span { color: var(--fcl-accent); }
+    .fcl-brand small { color: #5c6369; font-size: 12px; }
+    .fcl-day { display: flex; justify-content: space-between; align-items: center; font-size: 12px; padding: 4px 0 8px; }
+    .fcl-day span, .fcl-cycle span { color: #5c6369; }
+    .fcl-cycle { display: flex; gap: 24px; padding: 8px 0; }
+    .fcl-cycle div { display: grid; gap: 4px; }
+    .fcl-cycle span { font-size: 11px; }
+    .fcl-cycle strong { font-size: 18px; font-weight: 500; }
+    .fcl-cycle small { color: var(--fcl-muted); font-size: 12px; }
+    .fcl-page-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 0 8px; }
+    .fcl-page-header h1 { margin: 0; padding: 0; font-size: 24px; }
+    .fcl-version { color: var(--fcl-muted); border: 1px solid var(--fcl-line); border-radius: 4px; padding: 2px 6px; font-size: 11px; }
+    .fcl-nav { display: flex; gap: 28px; border-bottom: 1px solid var(--fcl-line); overflow-x: auto; padding: 4px 0 12px; white-space: nowrap; }
+    .fcl-nav a { color: #5c6369; text-decoration: none; font-size: 13px; }
+    .fcl-nav a:hover, .fcl-nav a:focus { color: var(--fcl-accent); }
+    .fcl-nav span { color: #949a9e; font-size: 13px; }
+    .fcl-schedule { display: flex; align-items: center; gap: 24px; max-width: 960px; min-height: 80px; padding: 12px 0; }
+    .fcl-schedule-label { color: #5c6369; font-size: 12px; white-space: nowrap; }
+    .fcl-stop { display: grid; gap: 4px; flex-shrink: 0; }
+    .fcl-stop span { color: var(--fcl-muted); font-size: 11px; }
+    .fcl-stop strong { font-size: 13px; font-weight: 500; }
+    .fcl-stop:last-child strong { color: var(--fcl-accent); }
+    .fcl-route { height: 1px; background: #d6dcda; flex: 1; min-width: 20px; max-width: 100px; position: relative; }
+    .fcl-route span { position: absolute; bottom: 6px; width: 100%; text-align: center; font-size: 10px; color: var(--fcl-muted); white-space: nowrap; }
+    .fcl-section { display: flex; align-items: center; gap: 12px; padding: 16px 0 8px; border-top: 1px solid var(--fcl-line); scroll-margin-top: 64px; }
+    .fcl-section>span { color: var(--fcl-muted); font-size: 11px; }
+    .fcl-section h2 { margin: 0; padding: 0; font-size: 18px; }
+    .st-key-fcl-shipment-heading .fcl-section { border-top: 0; padding-top: 0; }
+    .fcl-state { display: flex; gap: 8px; align-items: center; padding: 8px 0; font-size: 12px; color: var(--fcl-accent); }
+    .fcl-state:before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--fcl-accent); flex-shrink: 0; }
+    @media (max-width: 1100px) {
+      [data-testid="stMainBlockContainer"] { padding-left: 24px; padding-right: 24px; }
+      .st-key-fcl-shipment-heading [data-testid="stHorizontalBlock"] { flex-wrap: wrap; }
+      .st-key-fcl-shipment-heading [data-testid="stColumn"] { min-width: 160px; }
+      .st-key-fcl-shipment-heading [data-testid="stColumn"]:first-child { min-width: 100%; }
+      .fcl-schedule { gap: 16px; }
+      .fcl-schedule-label { display: none; }
+    }
+    @media (max-width: 700px) {
+      [data-testid="stMainBlockContainer"] { padding: 64px 16px 32px; }
+      .fcl-page-header h1 { font-size: 20px !important; }
+      .fcl-nav { gap: 20px; }
+      .fcl-schedule { gap: 10px; }
+      .fcl-stop strong { font-size: 11px; }
+      .fcl-stop span { font-size: 10px; }
+      .fcl-route { min-width: 8px; }
+      .fcl-route span { font-size: 9px; }
+      .st-key-fcl-summary [data-testid="stHorizontalBlock"] { flex-wrap: wrap; }
+      .st-key-fcl-summary [data-testid="stColumn"] { min-width: calc(50% - 12px); flex: 1; }
+      .st-key-fcl-summary [data-testid="stMetric"] { padding: 0; border: 0; }
+      .st-key-fcl-summary [data-testid="stMetricValue"] { font-size: 24px; }
+    }
+    </style>
+    """)
 
-with st.expander("📖 核心指标说明", expanded=False):
+
+def render_section_heading(number, title, anchor):
+    st.html(f'<div class="fcl-section" id="{escape(anchor)}">'
+            f'<span>{escape(number)}</span><h2>{escape(title)}</h2></div>')
+
+
+def render_supply_summary(frame):
+    def total(column):
+        if column not in frame.columns:
+            return "—"
+        values = pd.to_numeric(frame[column], errors='coerce')
+        return "—" if not values.notna().any() else f"{values.sum():,.0f} pcs"
+
+    # Read-only summaries of displayed values; no forecast or allocation calls.
+    shortage_count = (int(pd.to_numeric(frame['本轮合同缺口'], errors='coerce').gt(0).sum())
+                      if '本轮合同缺口' in frame.columns else None)
+    items = [
+        ('本轮实际发货量', total('本次总发货量')),
+        ('期末库存结余（含在途）', total(STOCK_BALANCE_COL)),
+        ('推荐下单量', total('推荐下单量')),
+        ('合同不足记录', f'{shortage_count:,} 行' if shortage_count is not None else '—'),
+    ]
+    for column, (label, value) in zip(st.columns(4), items):
+        column.metric(label, value)
+
+
+render_ui_styles()
+st.html('<div class="fcl-page-header"><h1>北美全渠道智能库存计算器</h1>'
+        '<span class="fcl-version">V3.7.0</span></div>')
+
+with st.expander("核心指标说明", expanded=False, icon=":material/help_outline:"):
     st.markdown("""
     **核心日期**：
     - 销售截止日：这批货应在该日期前售罄的业务底线日
@@ -2838,19 +2965,20 @@ with st.expander("📖 核心指标说明", expanded=False):
 # 侧边栏：日期与时效设置
 # ============================================================
 with st.sidebar:
-    st.header("⚙️ 1. 全局时间与排期控制")
+    st.html('<div class="fcl-brand"><strong>FCL<span>.</span></strong><small>全美备发货</small></div>')
+    st.header("全局时间与排期控制")
     today = datetime.date.today()
-    st.info(f"今天 (Day 0): {today.strftime('%Y-%m-%d')}")
+    st.html(f'<div class="fcl-day"><span>测算日 · Day 0</span><strong>{today:%Y-%m-%d}</strong></div>')
 
     default_sales_cutoff = today + datetime.timedelta(days=37 + 60)
     sales_cutoff = st.date_input(
-        "📅 本批次发货最晚销售截止日期",
+        "本批次发货最晚销售截止日期",
         value=default_sales_cutoff,
         help="这批货最晚应在该日期前售罄（默认目标上架日+60天）"
     )
-    earliest_etd = st.date_input("📅 本批次最早可发货日期",
+    earliest_etd = st.date_input("本批次最早可发货日期",
                                  value=today + datetime.timedelta(days=7))
-    target_eta = st.date_input("🎯 本轮发货目标上架时间",
+    target_eta = st.date_input("本轮发货目标上架时间",
                                value=today + datetime.timedelta(days=37))
 
     if sales_cutoff <= target_eta:
@@ -2861,11 +2989,11 @@ with st.sidebar:
     if d_diff < 0:
         st.error("上架时间不能早于最早发货日期！")
         st.stop()
-    st.success(f"物流 D差: {d_diff} 天")
-    st.success(f"销售窗口: {(sales_cutoff - target_eta).days} 天")
+    st.html(f'<div class="fcl-cycle"><div><span>物流间隔</span><strong>{d_diff} <small>天</small></strong></div>'
+            f'<div><span>销售窗口</span><strong>{(sales_cutoff - target_eta).days} <small>天</small></strong></div></div>')
 
     st.markdown("---")
-    st.subheader("🚢 各区海运在途时效（天）")
+    st.subheader("各区海运在途时效（天）")
     transit_times = {
         '美西': st.number_input("美西 (LA/LB)", value=25, step=1),
         '美东': st.number_input("美东 (NY/NJ)", value=45, step=1),
@@ -2878,7 +3006,7 @@ with st.sidebar:
         st.error(f"极速熔断：D差 ({d_diff}天) 小于最短海运时效 ({min(transit_times.values())}天)！")
 
     st.markdown("---")
-    st.subheader("📦 合同备发货参数")
+    st.subheader("合同备发货参数")
     default_ocean_cycle = int(round(sum(transit_times[r] for r in ['美西', '美东', 'GA', 'TX']) / 4))
     contract_ocean_cycle_days = st.number_input(
         "合同海运周期（天）", min_value=0, value=default_ocean_cycle, step=1,
@@ -2892,7 +3020,27 @@ with st.sidebar:
 # ============================================================
 # 数据上传与编辑
 # ============================================================
-st.header("📥 2. 上传/输入业务数据")
+nav_items = [('shipment', '备发货测算', True), ('allocation', '分仓指令', True),
+             ('recovery', '挽回与减量', st.session_state.get('current_stage') == 'S0'
+              and st.session_state.get('s12_records') is not None),
+             ('transfer', '分区调拨', st.session_state.get('current_stage') in ('S1', 'S2')),
+             ('sandbox', '时空沙盘', True)]
+st.html('<nav class="fcl-nav" aria-label="页面模块">' + ''.join(
+    f'<a href="#{anchor}">{label}</a>' if available else f'<span aria-disabled="true">{label}</span>'
+    for anchor, label, available in nav_items) + '</nav>')
+st.html(f'<div class="fcl-schedule"><span class="fcl-schedule-label">本轮排期</span>'
+        f'<div class="fcl-stop"><span>最早发货</span><strong>{earliest_etd:%Y-%m-%d}</strong></div>'
+        f'<div class="fcl-route"><span>{d_diff} 天</span></div>'
+        f'<div class="fcl-stop"><span>目标上架</span><strong>{target_eta:%Y-%m-%d}</strong></div>'
+        f'<div class="fcl-route"><span>{(sales_cutoff - target_eta).days} 天</span></div>'
+        f'<div class="fcl-stop"><span>销售截止</span><strong>{sales_cutoff:%Y-%m-%d}</strong></div></div>')
+
+with st.container(key='fcl-shipment-heading'):
+    shipment_title, template_column, recommendation_column = st.columns([4, 1.4, 2.2], vertical_alignment='center')
+    with shipment_title:
+        render_section_heading('02', '备发货测算', 'shipment')
+    template_slot = template_column.container()
+    recommendation_slot = recommendation_column.container()
 
 
 def generate_excel_template():
@@ -2928,16 +3076,20 @@ def generate_excel_template():
     return output.getvalue()
 
 
-col1, col2 = st.columns([1, 2])
-with col1:
+with template_slot:
     st.download_button(
-        "⬇️ 下载标准模板",
+        "下载标准模板",
         data=generate_excel_template(),
         file_name='北美智能分仓模板_V3.7.xlsx',
-        type="primary"
+        type="secondary", icon=":material/download:"
     )
-with col2:
-    uploaded_file = st.file_uploader("⬆️ 上传 Excel/CSV", type=["xlsx", "csv"])
+with st.container(key='fcl-imports'):
+    uploaded_file = st.file_uploader("销售预测 · Excel / CSV", type=["xlsx", "csv"])
+    contract_file = st.file_uploader(
+        "合同明细 + SPU交期 · Excel（Sheet1 合同明细，Sheet2 交期表）",
+        type=["xlsx"], key="contract_workbook"
+    )
+summary_slot = st.container(key='fcl-summary')
 
 if uploaded_file is not None:
     if uploaded_file.name.endswith('.xlsx'):
@@ -3030,6 +3182,8 @@ if rec_msgs:
 
 daily_editor_columns = [col for col in df_input.columns if is_daily_forecast_column(col)]
 editor_column_config = {col: None for col in daily_editor_columns}
+if 'SKU' in df_input.columns:
+    editor_column_config['SKU'] = {'pinned': True, 'width': 'medium'}
 if STOCK_BALANCE_COL in df_input.columns:
     # 兼容当前会话中已生成的小数结果，保留不适用行的空值。
     df_input[STOCK_BALANCE_COL] = pd.to_numeric(
@@ -3047,26 +3201,23 @@ edited_df = st.data_editor(
     num_rows="dynamic",
     use_container_width=True,
     column_config=editor_column_config,
+    row_height=36,
     key=f"main_editor_v{st.session_state.get('rec_version', 0)}"
 )
 
-contract_file = st.file_uploader(
-    "⬆️ 上传合同明细 + SPU交期 Excel（Sheet1 合同明细，Sheet2 交期表）",
-    type=["xlsx"], key="contract_workbook"
-)
+with summary_slot:
+    render_supply_summary(edited_df)
 
 # ============================================================
 # V3.7b: 生成推荐备发货量按钮
 # ============================================================
-col_rec1, col_rec2 = st.columns([1, 3])
-with col_rec1:
+with recommendation_slot:
     btn_recommend = st.button(
-        "📦 生成推荐备发货量", type="secondary",
+        "生成推荐备发货量", type="primary", icon=":material/calculate:",
         help="基于销售预测、在仓在途、本轮排期、合同明细和 SPU 交期，"
              "生成本轮推荐发货量、合同扣减、后续推荐下单量和最晚下单日。"
+             "生成后回写本次总发货量，可人工修改后再开始逆向推演运算。"
     )
-with col_rec2:
-    st.caption("生成后会回写「本次总发货量」为合同约束后的本轮实际发货量；可人工检查、修改后再点「开始逆向推演运算」。")
 
 if btn_recommend:
     button_daily_errors = validate_daily_forecast_input(edited_df, today)
@@ -3218,21 +3369,23 @@ if btn_recommend:
 
 detail = st.session_state.get('contract_stocking_detail')
 if detail:
-    st.markdown("#### 📦 合同备发货测算明细")
-    tab_deduct, tab_plan, tab_errors = st.tabs(["合同扣减明细", "剩余合同发货计划", "异常检查"])
-    with tab_deduct:
+    st.markdown("#### 合同备发货测算明细")
+    with st.container():
+        st.markdown("##### 合同扣减明细")
         records = detail.get('deduct_records', [])
         if records:
             st.dataframe(pd.DataFrame(records), use_container_width=True)
         else:
             st.info("无本轮合同扣减记录。")
-    with tab_plan:
+    with st.container():
+        st.markdown("##### 剩余合同发货计划")
         records = detail.get('plan_records', [])
         if records:
             st.dataframe(pd.DataFrame(records), use_container_width=True)
         else:
             st.info("无剩余合同发货计划。")
-    with tab_errors:
+    with st.container():
+        st.markdown("##### 异常检查")
         records = detail.get('exception_records', [])
         if records:
             st.dataframe(pd.DataFrame(records), use_container_width=True)
@@ -3326,24 +3479,24 @@ def compute_main_board(df, transit_dict, earliest_etd, target_eta, today, sales_
 # ============================================================
 # 主看板交互
 # ============================================================
-st.header("🚀 3. 智能分仓指令看板")
+render_section_heading('03', '智能分仓指令看板', 'allocation')
 
-col_btn1, col_btn2, col_btn3, col_btn4 = st.columns([2, 2, 2, 1])
+col_btn1, col_btn2, col_btn3 = st.columns(3)
 with col_btn1:
     # 启用调拨时不允许聚合（汇总后无法做行间调拨）
     transfer_disabled_for_agg = False  # 占位，后续判断
-    agg_on = st.checkbox("🔄 同组别同SKU 汇总计算",
+    agg_on = st.checkbox("同组别同SKU 汇总计算",
                          value=False,
                          help="启用后，相同 SKU+组别 的多行数据会自动合并为一行计算")
 with col_btn2:
-    south_linkage = st.checkbox("🔘 美南仓 (GA/TX) 联动合并优化", value=False)
+    south_linkage = st.checkbox("美南仓 (GA/TX) 联动合并优化", value=False)
 with col_btn3:
-    transfer_on = st.checkbox("🔄 启用跨店库存调拨分析", value=False,
+    transfer_on = st.checkbox("启用跨店库存调拨分析", value=False,
                               help="启用后，运算时同步计算 4 阶段调拨方案")
     if transfer_on and agg_on:
         st.warning("汇总计算和调拨分析互斥（汇总后只剩一行，无法做行间调拨）")
-with col_btn4:
-    btn_run = st.button("🚀 开始逆向推演运算", type="primary")
+with st.container(horizontal=True, horizontal_alignment='right'):
+    btn_run = st.button("开始逆向推演运算", type="primary", icon=":material/play_arrow:")
 
 # Session State 初始化
 SESSION_KEYS = [
@@ -3460,17 +3613,17 @@ if st.session_state['alloc_result_s0'] is not None:
     # 状态标签(独立模式和完整流程用不同文案)
     if st.session_state.get('independent_mode'):
         stage_label_map = {
-            'S0': "📊 当前显示：**原始基线方案**",
-            'S1': "📊 当前显示：**S0 原始基线**（独立模式,主看板未变化,分区调拨方案见下方）",
-            'S2': "📊 当前显示：**S0 + 分区调拨方案**（独立模式,跳过了阶段1+2）"
+            'S0': "当前显示：原始基线方案",
+            'S1': "当前显示：S0 原始基线（独立模式，主看板未变化，分区调拨方案见下方）",
+            'S2': "当前显示：S0 + 分区调拨方案（独立模式，跳过了阶段1+2）"
         }
     else:
         stage_label_map = {
-            'S0': "📊 当前显示：**原始基线方案**",
-            'S1': "📊 当前显示：**挽回+减量后的方案**（阶段1+2 完成）",
-            'S2': "📊 当前显示：**完整调拨方案**（阶段3 完成）"
+            'S0': "当前显示：原始基线方案",
+            'S1': "当前显示：挽回+减量后的方案（阶段1+2 完成）",
+            'S2': "当前显示：完整调拨方案（阶段3 完成）"
         }
-    st.info(stage_label_map[stage])
+    st.html(f'<div class="fcl-state">{escape(stage_label_map[stage])}</div>')
     # 选择展示哪一份数据
     if stage == 'S0':
         cached_result = st.session_state['alloc_result_s0']
@@ -3480,10 +3633,10 @@ if st.session_state['alloc_result_s0'] is not None:
         cached_result = st.session_state['alloc_result_s2']
 
     # 过滤检索
-    st.markdown("### 🔍 极速检索与结果过滤")
+    st.markdown("#### 结果筛选")
     col_f1, col_f2, col_f3, col_f4 = st.columns(4)
     with col_f1:
-        search_sku = st.text_input("模糊搜索 SKU", placeholder="敲击回车即搜...")
+        search_sku = st.text_input("模糊搜索 SKU", placeholder="搜索 SKU")
     with col_f2:
         sel_shop = st.multiselect("过滤 店铺", options=cached_result['店铺'].unique())
     with col_f3:
@@ -3507,10 +3660,10 @@ if st.session_state['alloc_result_s0'] is not None:
         try:
             if '预估跨区订单数量' in row.index and row['预估跨区订单数量'] > 0:
                 styles[row.index.get_loc('预估跨区订单数量')] = (
-                    'background-color: #fff3cd; color: #cc0000; font-weight: bold')
+                    'background-color: #fbf6eb; color: #986018; font-weight: 500')
             if '_is_redundant' in row.index and row['_is_redundant']:
                 styles[row.index.get_loc('预估全网耗尽日')] = (
-                    'background-color: #ffcccc; color: #990000; font-weight: bold')
+                    'background-color: #fbeeea; color: #a44535; font-weight: 500')
         except (KeyError, ValueError):
             pass
         return styles
@@ -3528,7 +3681,7 @@ if st.session_state['alloc_result_s0'] is not None:
         f"导出当前视图（{stage}）",
         data=csv_data,
         file_name=f'装柜排期_{stage}_{today.strftime("%Y%m%d")}.csv',
-        mime='text/csv'
+        mime='text/csv', icon=":material/download:"
     )
 
 # ============================================================
@@ -3537,14 +3690,14 @@ if st.session_state['alloc_result_s0'] is not None:
 if (st.session_state['current_stage'] == 'S0'
         and st.session_state.get('s12_records') is not None):
     st.markdown("---")
-    st.header("🔴 4. 阶段1+2：挽回与减量方案")
+    render_section_heading('04', '阶段1+2：挽回与减量方案', 'recovery')
 
     s12 = st.session_state['s12_records']
     s1_transfer = s12['s1_transfer']
     s2_reduce = s12['s2_reduce']
 
     # 表1：减量明细
-    st.markdown("#### 📉 表1·减量明细（阶段2）")
+    st.markdown("#### 表1 · 减量明细（阶段2）")
     if s2_reduce:
         df_reduce = pd.DataFrame(s2_reduce)
         st.dataframe(df_reduce, use_container_width=True)
@@ -3552,7 +3705,7 @@ if (st.session_state['current_stage'] == 'S0'
         st.info("无需减量：所有 SKU 整体不冗余，或冗余已被冗余调拨完全消化。")
 
     # 表2-A：冗余调拨记录
-    st.markdown("#### 🔄 表2-A·冗余调拨指令（阶段1）")
+    st.markdown("#### 表2-A · 冗余调拨指令（阶段1）")
     if s1_transfer:
         df_t1 = pd.DataFrame(s1_transfer)
         st.dataframe(df_t1, use_container_width=True)
@@ -3561,7 +3714,7 @@ if (st.session_state['current_stage'] == 'S0'
 
     # 效果摘要
     if s1_transfer or s2_reduce:
-        st.markdown("#### 📊 阶段1+2 效果摘要")
+        st.markdown("#### 阶段1+2 效果摘要")
         baseline = st.session_state['baseline_df']
         after = st.session_state['stage12_df']
         sales_window = (sales_cutoff - today).days
@@ -3596,7 +3749,7 @@ if (st.session_state['current_stage'] == 'S0'
     st.markdown("---")
     col_b1, col_b2 = st.columns([1, 1])
     with col_b1:
-        if st.button("✅ 确认挽回方案,主看板刷新并继续优化", type="primary"):
+        if st.button("确认挽回方案并继续优化", type="primary", icon=":material/check:"):
             with st.spinner("正在刷新主看板 + 计算阶段3+4..."):
                 # 主看板基于 stage12_df 刷新
                 st.session_state['alloc_result_s1'] = compute_main_board(
@@ -3622,7 +3775,7 @@ if (st.session_state['current_stage'] == 'S0'
                 st.session_state['independent_mode'] = False  # 完整流程
             st.rerun()
     with col_b2:
-        if st.button("⚡ 仅运算分区调拨", type="secondary",
+        if st.button("仅运算分区调拨", type="secondary", icon=":material/swap_horiz:",
                      help="跳过挽回方案,直接基于 S0 原始数据运算分区调拨"):
             with st.spinner("正在基于 S0 原始数据运算分区调拨..."):
                 # 主看板复用 S0 数据(剔除备注: 进入后续运算后备注消失)
@@ -3654,18 +3807,18 @@ if (st.session_state['current_stage'] == 'S0'
 # ============================================================
 if st.session_state['current_stage'] in ('S1', 'S2'):
     st.markdown("---")
-    st.header("⚖️ 5. 阶段3+4:降本与死冗余报告")
+    render_section_heading('05', '阶段3+4：降本与死冗余报告', 'transfer')
 
     # 状态提示:区分独立路径和完整路径
     if st.session_state.get('independent_mode'):
-        st.warning("🔵 当前为【仅运算分区调拨】独立模式:基于 S0 原始数据,跳过了阶段1+2 挽回方案。")
+        st.info("当前为「仅运算分区调拨」独立模式：基于 S0 原始数据，跳过阶段1+2 挽回方案。")
 
     s34 = st.session_state.get('s34_records', {})
     s3_transfer = s34.get('s3_transfer', [])
     s4_dead = s34.get('s4_dead', [])
 
     # 表2-B：分区调拨指令
-    st.markdown("#### 🔄 表2-B·分区调拨指令（阶段3）")
+    st.markdown("#### 表2-B · 分区调拨指令（阶段3）")
     if s3_transfer:
         df_t3 = pd.DataFrame(s3_transfer)
         st.dataframe(df_t3, use_container_width=True)
@@ -3673,7 +3826,7 @@ if st.session_state['current_stage'] in ('S1', 'S2'):
         st.info("无可行分区调拨：当前方案在跨区维度已接近最优。")
 
     # 表3：调拨前后对比
-    st.markdown("#### 📊 表3·调拨前后占比与跨区订单对比（基准 = S0 原始基线）")
+    st.markdown("#### 表3 · 调拨前后占比与跨区订单对比（基准 = S0 原始基线）")
     baseline = st.session_state['baseline_df']
     final_df = st.session_state['stage34_df']
     compare_records = []
@@ -3723,16 +3876,16 @@ if st.session_state['current_stage'] in ('S1', 'S2'):
         def color_cz(row):
             styles = [''] * len(row)
             if row['SKU'] == '全局汇总':
-                styles = ['background-color: #e6f2ff; font-weight: bold'] * len(row)
+                styles = ['background-color: #f4f6f6; font-weight: 600'] * len(row)
             cz_str = str(row['跨区单数改善'])
             if cz_str.startswith('+'):
                 # 正数 = 变好 → 绿色
                 idx_loc = row.index.get_loc('跨区单数改善')
-                styles[idx_loc] += '; color: #70AD47; font-weight: bold'
+                styles[idx_loc] += '; color: #176d66; font-weight: 600'
             elif cz_str.startswith('-') and cz_str != '0':
                 # 负数 = 变坏 → 红色
                 idx_loc = row.index.get_loc('跨区单数改善')
-                styles[idx_loc] += '; color: #C00000; font-weight: bold'
+                styles[idx_loc] += '; color: #b54338; font-weight: 600'
             return styles
 
 
@@ -3740,15 +3893,15 @@ if st.session_state['current_stage'] in ('S1', 'S2'):
 
     # 表4:死冗余报告（必须在 if compare_records 外面,独立显示）
     if st.session_state.get('independent_mode'):
-        st.markdown("#### 🟠 表4·剩余冗余报告(阶段4,独立模式)")
+        st.markdown("#### 表4 · 剩余冗余报告（阶段4，独立模式）")
         st.info("⚠️ 当前为独立模式,未经阶段2 减量,以下「剩余冗余量」包含原始冗余,数据可能虚高,仅供参考。")
     else:
-        st.markdown("#### 🔴 表4·死冗余预警(阶段4)")
+        st.markdown("#### 表4 · 死冗余预警（阶段4）")
 
     if s4_dead:
         df_dead = pd.DataFrame(s4_dead)
         st.dataframe(
-            df_dead.style.apply(lambda r: ['background-color: #ffe6e6; color: #990000'] * len(r), axis=1),
+            df_dead.style.apply(lambda r: ['background-color: #fbeeea; color: #a44535'] * len(r), axis=1),
             use_container_width=True
         )
         if not st.session_state.get('independent_mode'):
@@ -3761,7 +3914,8 @@ if st.session_state['current_stage'] in ('S1', 'S2'):
     if st.session_state['current_stage'] == 'S1':
         col_a1, col_a2 = st.columns([1, 1])
         with col_a1:
-            if st.button("✅ 应用全部方案，主看板刷新为最终状态", type="primary"):
+            if st.button("应用全部方案", type="primary", icon=":material/check:",
+                         help="应用方案后，主看板刷新为最终状态。"):
                 with st.spinner("正在应用最终方案..."):
                     st.session_state['alloc_result_s2'] = compute_main_board(
                         st.session_state['stage34_df'], transit_times,
@@ -3770,24 +3924,24 @@ if st.session_state['current_stage'] in ('S1', 'S2'):
                     st.session_state['current_stage'] = 'S2'
                 st.rerun()
         with col_a2:
-            if st.button("⏪ 全部撤销，回到原始基线"):
+            if st.button("全部撤销，回到原始基线", icon=":material/undo:"):
                 st.session_state['current_stage'] = 'S0'
                 st.rerun()
     else:  # S2
         if st.session_state.get('independent_mode'):
             # 独立模式:只有"全部撤销"按钮(因为没有挽回方案可回)
-            if st.button("⏪ 全部撤销,回到原始基线"):
+            if st.button("全部撤销，回到原始基线", icon=":material/undo:"):
                 st.session_state['current_stage'] = 'S0'
                 st.rerun()
         else:
             # 完整流程:两个撤销按钮都显示
             col_a1, col_a2 = st.columns([1, 1])
             with col_a1:
-                if st.button("↩️ 撤销分区调拨,回到挽回方案"):
+                if st.button("撤销分区调拨，回到挽回方案", icon=":material/undo:"):
                     st.session_state['current_stage'] = 'S1'
                     st.rerun()
             with col_a2:
-                if st.button("全部撤销,回到原始基线"):
+                if st.button("全部撤销，回到原始基线", icon=":material/undo:"):
                     st.session_state['current_stage'] = 'S0'
                     st.rerun()
 
@@ -3795,12 +3949,12 @@ if st.session_state['current_stage'] in ('S1', 'S2'):
 # 时空沙盘
 # ============================================================
 st.markdown("---")
-st.header("🕰️ 6. 时空沙盘：穿越任意日期推演")
+render_section_heading('06', '时空沙盘', 'sandbox')
 
 col_d1, col_d2 = st.columns([1, 4])
 with col_d1:
-    target_query = st.date_input("📅 选择查询日期", value=target_eta, key='sandbox_date')
-    sandbox_btn = st.button("🚀 穿越至该日推演", type="secondary")
+    target_query = st.date_input("选择查询日期", value=target_eta, key='sandbox_date')
+    sandbox_btn = st.button("推演该日", type="secondary", icon=":material/calendar_month:")
 
 with col_d2:
     if sandbox_btn:
